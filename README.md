@@ -1,156 +1,110 @@
-# KINA: Knowledge Index of Noah's Ark Benchmark 🚢
+# KINA — Knowledge Index of Noah's Ark Benchmark
+
+[中文文档](README.zh-CN.md)
+
 ![KINA](images/kina_banner_white.svg)
 
-Tools to run model inference and **Pass@1** scoring on the **KINA** benchmark. 
-**KINA** is an 899-item knowledge benchmark across 261 fine-grained disciplines. It provides a highly diagnostic evaluation of frontier LLMs with multi-discipline questions featuring **one correct** option among lettered choices **A–J** (as in the public [KINA.json](https://huggingface.co/datasets/2077AIDataFoundation/KINA) release).
+KINA evaluates model knowledge with 899 multiple-choice questions across 261 disciplines. Each question has one correct option. This fork runs the public dataset through an OpenAI-compatible Chat Completions endpoint and scores the submitted option letter locally. [Original KINA repository](https://github.com/2077AI/KINA) · [Official dataset](https://huggingface.co/datasets/2077AIDataFoundation/KINA)
 
-> Scoring reuses [lighteval](https://github.com/huggingface/lighteval) letter-extraction and Pass@*k* metrics (the same multi-choice path used for other letter-style tasks in the library). The **dataset file format** is the indexed JSON described below, not the legacy labeling-platform export.
-  
-## Environment setup
+## Install and download the dataset
 
-```bash
-conda create -n kina_bench python=3.10 -y && conda activate kina_bench
-pip install -e .
-```
-
-### SGLang (optional)
-
-For local OpenAI-compatible servers (e.g. vLLM, SGLang), install the server stack you use; SGLang example:
+Run these commands in Bash or Zsh with Git, curl, and Python 3.11.
 
 ```bash
-pip install sglang[all]
+git clone https://github.com/jackhe183/KINA.git
+cd KINA
+python3.11 -m venv .venv
+.venv/bin/python -m pip install -e .
+mkdir -p data
+curl -fL --retry 3 \
+  https://huggingface.co/datasets/2077AIDataFoundation/KINA/resolve/860c64e856375ed42929737fb8b8f37272c97065/KINA.json \
+  -o data/KINA.json
 ```
 
-See the [SGLang documentation](https://github.com/sgl-project/sglang) for details.
+The CLI reads the local JSON. It uses each row's `index` as the question ID. The public dataset contains IDs 0–898.
 
-## Data file
+## Run a three-question streaming test
 
-1. Download the dataset from [KINA](https://huggingface.co/datasets/2077AIDataFoundation/KINA).
-2. Place the dataset JSON under **`KINA/data/`** (or symlink it from the monorepo root), using the name expected by `--data_name` (default: `KINA` → `data/KINA.json`).
-3. Example (from the parent KINA repo):
-
-   ```bash
-   mkdir -p data
-   ln -sf ../../data/KINA.json data/KINA.json
-   ```
-
-   If your file lives elsewhere or uses another name, point `ln -sf <source> data/KINA.json` to that path.
-
-The expected format is a **JSON array** of 899 objects; each object includes at least:
-
-| Field | Type | Description |
-|--------|------|-------------|
-| `index` | int | Global index `0 .. 898` (stable id for runs and results) |
-| `discipline` | string | Subject / domain |
-| `question` | string | Full question text |
-| `options` | array | `{ "key", "answer", "explanation"?, "source"? }` per row |
-| `correct_answer` | string | Single letter `A`–`J` |
-| `question_source` | string | optional |
-| `question_material` | string | optional (e.g. images / context) |
-
-Internal runtime representation maps `discipline` → `metadata.category`, `question_source` → `metadata.source`, `question_material` → `metadata.materials`, and uses **`id` = `index`** for resume keys and result lines.
-
-## Usage
-
-### Commercial API (OpenAI, OpenRouter, etc.)
+Set `OPENAI_BASE` to your endpoint's API base URL, for example one ending in `/v1`. Set `KINA_MODEL` to the model ID accepted by that endpoint. Enter the API key at the prompt.
 
 ```bash
-export OPENAI_BASE="https://api.openai.com/v1"   # or https://openrouter.ai/api/v1
-export OPENAI_KEY="your-api-key"
+export OPENAI_BASE='https://your-gateway.example/v1'
+KINA_MODEL='gpt-6.1-sol'
+printf 'Enter API key (hidden): '
+read -rs OPENAI_KEY
+printf '\n'
+export OPENAI_KEY
 
-python src/kina_bench/run_openai_chat.py \
-    --model_id "gpt-4o" \
-    --data_name "KINA" \
-    --n_thread 32
+.venv/bin/python src/kina_bench/run_openai_chat.py \
+  --model_id "$KINA_MODEL" \
+  --data_name KINA \
+  --limit 3 \
+  --n_sampling 1 \
+  --n_thread 20 \
+  --requests_per_second 1 \
+  --max_tokens 16384 \
+  --timeout 300 \
+  --stream
 ```
 
-You can also use a `.env` in the project root (see `.env.example`).
+`--limit 3` selects the first three rows and stores the results in a separate directory. Remove `--stream` to use a regular JSON response. If your endpoint requires `max_completion_tokens`, replace `--max_tokens 16384` with `--max_completion_tokens 16384`.
 
-### Local OpenAI-compatible server (e.g. SGLang)
+The runner always uses Chat Completions. It omits `temperature`, `top_p`, and reasoning controls so the endpoint can apply its defaults. Streaming requests ask the endpoint to include token usage.
 
-**1. Start the server** (example):
+## Run all 899 questions
+
+Use the same endpoint and model configuration in the same shell. Run this command without `--limit`.
 
 ```bash
-python -m sglang.launch_server \
-    --model-path Qwen/Qwen3-8B \
-    --port 8000
+.venv/bin/python src/kina_bench/run_openai_chat.py \
+  --model_id "$KINA_MODEL" \
+  --data_name KINA \
+  --n_sampling 1 \
+  --n_thread 20 \
+  --requests_per_second 1 \
+  --max_tokens 16384 \
+  --timeout 300 \
+  --stream
 ```
 
-**2. Run evaluation**
+For four samples per question, use `--n_sampling 4` on an endpoint that supports four choices in one response. If your endpoint accepts only one choice, use four independent full runs with separate result directories. Move each run's result directory out of `results/` before starting the next run with the same options. For AVG@4, add the correct answers across the four runs and divide by 3,596, counting each question once per run.
+
+## CLI options
+
+| Option | Default | Behavior |
+| --- | --- | --- |
+| `--model_id` | Required | Model ID sent to the endpoint. |
+| `--data_name` | `KINA-899` | Dataset basename under `data/`. Use `KINA` for the downloaded file above. |
+| `--limit` | All rows | Read the first N rows and use a separate output directory. |
+| `--n_sampling` | `1` | Request 1, 4, or 8 choices per question in one Chat request. |
+| `--n_thread` | `1` | Set the maximum number of concurrent question workers. |
+| `--requests_per_second` | `1` | Limit request starts per process, including retries. Accepts positive decimals. |
+| `--max_tokens` | `16384` | Send the token budget as `max_tokens`. |
+| `--max_completion_tokens` | Unset | Send the token budget as `max_completion_tokens` instead. Choose only one token option. |
+| `--timeout` | `300` | Set the deadline in seconds for each attempt, including stream consumption. |
+| `--stream` | Off | Collect streamed Chat Completions chunks before scoring. |
+| `--skip_inference` | Off | Score saved responses locally. |
+| `--overwrite` | Off | Start inference from scratch for the selected output path. |
+| `-h`, `--help` | | Show CLI help. |
+
+With `--n_thread 20 --requests_per_second 1`, the first request starts immediately. The runner waits at least one second between request starts and allows up to 20 questions to be in flight. Retryable failures can receive up to ten retries, all subject to the same start-rate limit.
+
+## Resume, score, and inspect results
+
+- **Resume.** Rerun the same command to reuse saved completions and retry unfinished questions. A normal run writes the final score file after results cover the selected questions.
+- **Score locally.** Append `--skip_inference` to the same command to score saved responses without an API request. Keep the model, dataset, sample count, token field and value, stream setting, and question limit. An incomplete run gives a partial score. Check `total_num` before reporting a full benchmark score.
+- **Read the files.** Find results under `results/<model_id>/<generation>/`. For example, the streaming smoke test writes to `results/gpt-6.1-sol/n1_tokens16384_max_tokens_stream_limit3/`. `KINA.jsonl` contains raw responses and usage. `KINA.json` contains per-question scores, extracted choices, and reference answers.
+
+The last nonempty line of each visible response must contain one listed option in the form `Answer: X`. A matching letter earns 1. Missing, ambiguous, or incorrect answers earn 0. With multiple completions, the question score is the fraction that are correct. The summary averages the question scores.
 
 ```bash
-export OPENAI_BASE="http://localhost:8000/v1"
-export OPENAI_KEY="EMPTY"
-
-python src/kina_bench/run_openai_chat.py \
-    --model_id "Qwen/Qwen3-8B" \
-    --data_name "KINA" \
-    --n_thread 64
+.venv/bin/python src/kina_bench/pretty_print.py --data_name KINA
 ```
 
-### Command-line arguments
+## Run the offline tests
 
-| Argument | Default | Description |
-|----------|---------|-------------|
-| `--model_id` | (required) | Model id passed to the API |
-| `--data_name` | `KINA` | Basename of `data/{data_name}.json` (no extension) |
-| `--n_sampling` | `1` | Parallel completions per question: **1, 4, or 8** |
-| `--max_tokens` | `16384` | Max output tokens (or completion budget where applicable) |
-| `--think_mode` | `none` | `none`, `think`, or `nothink` (Qwen-style chat template) |
-| `--reasoning_effort` | `None` | For o1 / GPT-5 family: `low`, `medium`, `high` |
-| `--n_thread` | `1` | Concurrent requests |
-| `--overwrite` | `False` | Overwrite an existing `jsonl` from scratch |
-| `--timeout` | `300` | Per-request timeout (seconds) |
-| `--limit` | `None` | Cap how many *remaining* items to run (debug) |
-| `--skip_inference` | `False` | Skip API calls; only evaluate existing `jsonl` if complete |
-
-> **`--skip_inference`**: If some items failed in inference, post-processing (aggregate JSON) is skipped until the set is complete. Re-run the same command to resume, or use `--skip_inference` to force scoring on whatever finished.
-
-### View aggregated scores
+The tests use a local mock Chat endpoint and a small fixture dataset. They cover streaming, request options and pacing, timeout handling, and answer extraction. The test command requires neither an API key nor the official dataset.
 
 ```bash
-python src/kina_bench/pretty_print.py --data_name KINA
-```
-
-## Output layout
-
-### Intermediate: `results/{model_id}/n{n}_tokens{max}/{data_name}.jsonl`
-
-One JSON object per line: `id` (question index), `request`, `responses` (list of `content` / `reasoning`), `metadata` (full parsed row), token usage.
-
-### Final: `results/{model_id}/n{n}_tokens{max}/{data_name}.json`
-
-List of:
-
-```json
-{
-    "id": 0,
-    "score": 0.75,
-    "extracted_predictions": [["A", "A"], ["B", "B"]],
-    "gt": "A"
-}
-```
-
-- `score`: Pass@1 in `[0, 1]`
-- `extracted_predictions`: one list of extracted letters per parallel sample
-- `gt`: `correct_answer` from the dataset
-
-## Repository layout
-
-```
-KINA-Benchmark/
-├── data/
-│   └── KINA.json                  # add or symlink (not committed by default)
-├── results/
-│   └── {model_id}/
-│       └── n{n}_tokens{max}/
-│           ├── {data_name}.jsonl
-│           └── {data_name}.json
-├── src/
-│   └── kina_bench/
-│       ├── run_openai_chat.py
-│       ├── utils.py
-│       ├── pretty_print.py
-│       └── config.py
-└── pyproject.toml
+.venv/bin/python -m unittest discover -s tests -v
 ```
